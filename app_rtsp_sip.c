@@ -207,7 +207,7 @@ static const char app[] = "RTSP-SIP";
 #define SIP_STATE_INFO		10
 
 
-#define PKT_PAYLOAD     1450
+#define PKT_PAYLOAD     9000
 #define PKT_SIZE        (sizeof(struct ast_frame) + AST_FRIENDLY_OFFSET + PKT_PAYLOAD)
 #define PKT_OFFSET      (sizeof(struct ast_frame) + AST_FRIENDLY_OFFSET)
 
@@ -959,19 +959,7 @@ static int RtspPlayerConnect(struct RtspPlayer *player, const char *ip, int port
 		sprintf(player->hostport,"[%s]",player->ip);
 	else
 		/* normal*/
-		strcpy(player->hostport,player->ip);
-
-	/* If not standard port */
-	if (port!=554)
-	{
-		/* Append port to ip */
-		/* PORT 17.5, fix compiler warning about sprintf arg1 alias w. arg3 */
-	     /*	sprintf(player->hostport,"%s:%d",player->hostport,player->port); OLD */
-		char temp[100];
-		strcpy(temp,player->hostport);
-	       	sprintf(player->hostport,"%s:%d",temp,player->port); 
-	}
-
+		sprintf(player->hostport,"%s:%d",player->ip,player->port);
 
 	/* Free mem */
      /*	free(sendAddr); OLD */
@@ -1064,7 +1052,7 @@ static void RrspPlayerSetAudioTransport(struct RtspPlayer *player,const char* tr
 static void RrspPlayerSetVideoTransport(struct RtspPlayer *player,const char* transport)
 {
 	char *i;
-	int port;
+	int rtp_port,rtcp_port;
 	struct sockaddr * addr;
 	int size;
 	int PF;
@@ -1079,6 +1067,9 @@ static void RrspPlayerSetVideoTransport(struct RtspPlayer *player,const char* tr
 		return;
 	}
 
+	/* Get port number */
+	rtp_port = atoi(i+12);
+
 	/* Get to the rtcp port */
 	if (!(i=strstr(i,"-")))
 	{
@@ -1090,15 +1081,23 @@ static void RrspPlayerSetVideoTransport(struct RtspPlayer *player,const char* tr
 	}	
 
 	/* Get port number */
-	port = atoi(i+1);
+	rtcp_port = atoi(i+1);
 
 	/* Get send address */
-	addr = GetIPAddr(player->ip,port,player->isIPv6,&size,&PF);
+	addr = GetIPAddr(player->ip,rtp_port,player->isIPv6,&size,&PF);
+
+	/* Connect */
+	if (connect(player->videoRtp,addr,size)<0)
+		/* Log */
+		ast_log(LOG_DEBUG,"Could not connect video rtp port [%s,%d,%d].%s\n", player->ip,rtp_port,errno,strerror(errno));
+
+	/* Get send address */
+	addr = GetIPAddr(player->ip,rtcp_port,player->isIPv6,&size,&PF);
 
 	/* Connect */
 	if (connect(player->videoRtcp,addr,size)<0)
 		/* Log */
-		ast_log(LOG_DEBUG,"Could not connect video rtcp port [%s,%d,%d].%s\n", player->ip,port,errno,strerror(errno));
+		ast_log(LOG_DEBUG,"Could not connect video rtcp port [%s,%d,%d].%s\n", player->ip,rtcp_port,errno,strerror(errno));
 
 	/* Free Addr */
      /*	free(addr); OLD */
@@ -1150,8 +1149,8 @@ static int RtspPlayerOptions(struct RtspPlayer *player,const char *url)
         snprintf(request,1024,
                         "OPTIONS rtsp://%s%s RTSP/1.0\r\n"
                         "CSeq: %d\r\n"
-                        "Session: %s\r\n"
-                        "User-Agent: app_rtsp\r\n",
+                        "User-Agent: app_rtsp\r\n"
+                        "Session: %s\r\n",
                         player->hostport,url,player->cseq,player->session[player->numSessions-1]);
 
         /* End request */
@@ -1551,23 +1550,32 @@ static int RtspPlayerSetupAudio(struct RtspPlayer* player,const char *url)
 		/* Prepare request */
 		snprintf(request,1024,
 				"SETUP %s RTSP/1.0\r\n"
+				"Transport: RTP/AVP/UDP;unicast;client_port=%d-%d\r\n"
 				"CSeq: %d\r\n"
-				"%s"
-				"Transport: RTP/AVP;unicast;client_port=%d-%d\r\n"
 				"User-Agent: app_rtsp\r\n"
-				"\r\n",
-				url,player->cseq,sessionheader,player->audioRtpPort,player->audioRtcpPort);
+				"%s",
+				url,player->audioRtpPort,player->audioRtcpPort,player->cseq,sessionheader);
 	} else {
 		/* Prepare request */
 		snprintf(request,1024,
 				"SETUP rtsp://%s%s/%s RTSP/1.0\r\n"
+				"Transport: RTP/AVP/UDP;unicast;client_port=%d-%d\r\n"
 				"CSeq: %d\r\n"
-				"%s"
-				"Transport: RTP/AVP;unicast;client_port=%d-%d\r\n"
 				"User-Agent: app_rtsp\r\n"
-				"\r\n",
-				player->hostport,player->url,url,player->cseq,sessionheader,player->audioRtpPort,player->audioRtcpPort);
+				"%s",
+				player->hostport,player->url,url,player->audioRtpPort,player->audioRtcpPort,player->cseq,sessionheader);
 	}
+
+	/* If we are authorized */
+	if (player->authorization)
+	{
+		/* Append header */
+		strcat(request,player->authorization);
+		/* End line */
+		strcat(request,"\r\n");
+	}
+	/* End request */
+	strcat(request,"\r\n");
 
 	/* Send request */
 	if (!SendRequest(player->fd,request,&player->end))
@@ -1603,23 +1611,32 @@ static int RtspPlayerSetupVideo(struct RtspPlayer* player,const char *url)
 		/* Prepare request */
 		snprintf(request,1024,
 				"SETUP %s RTSP/1.0\r\n"
+				"Transport: RTP/AVP/UDP;unicast;client_port=%d-%d\r\n"
 				"CSeq: %d\r\n"
-				"%s"
-				"Transport: RTP/AVP;unicast;client_port=%d-%d\r\n"
 				"User-Agent: app_rtsp\r\n"
-				"\r\n",
-				url,player->cseq,sessionheader,player->videoRtpPort,player->videoRtcpPort);
+				"%s",
+				url,player->videoRtpPort,player->videoRtcpPort,player->cseq,sessionheader);
 	} else {
 		/* Prepare request */
 		snprintf(request,1024,
 				"SETUP rtsp://%s%s/%s RTSP/1.0\r\n"
+				"Transport: RTP/AVP/UDP;unicast;client_port=%d-%d\r\n"
 				"CSeq: %d\r\n"
-				"%s"
-				"Transport: RTP/AVP;unicast;client_port=%d-%d\r\n"
 				"User-Agent: app_rtsp\r\n"
-				"\r\n",
-				player->hostport,player->url,url,player->cseq,sessionheader,player->videoRtpPort,player->videoRtcpPort);
+				"%s",
+				player->hostport,player->url,url,player->videoRtpPort,player->videoRtcpPort,player->cseq,sessionheader);
 	}
+
+	/* If we are authorized */
+	if (player->authorization)
+	{
+		/* Append header */
+		strcat(request,player->authorization);
+		/* End line */
+		strcat(request,"\r\n");
+	}
+	/* End request */
+	strcat(request,"\r\n");
 
 	/* Send request */
 	if (!SendRequest(player->fd,request,&player->end))
@@ -1654,10 +1671,20 @@ static int RtspPlayerPlay(struct RtspPlayer* player)
 		snprintf(request,1024,
 				"PLAY rtsp://%s%s RTSP/1.0\r\n"
 				"CSeq: %d\r\n"
-				"Session: %s\r\n"
 				"User-Agent: app_rtsp\r\n"
-				"\r\n",
+				"Session: %s\r\n",
 				player->hostport,player->url,player->cseq,player->session[i]);
+
+		/* If we are authorized */
+		if (player->authorization)
+		{
+			/* Append header */
+			strcat(request,player->authorization);
+			/* End line */
+			strcat(request,"\r\n");
+		}
+		/* End request */
+		strcat(request,"\r\n");
 
 		/* Send request */
 		if (!SendRequest(player->fd,request,&player->end))
@@ -1693,10 +1720,21 @@ static int RtspPlayerTeardown(struct RtspPlayer* player)
 		snprintf(request,1024,
 				"TEARDOWN rtsp://%s%s RTSP/1.0\r\n"
 				"CSeq: %d\r\n"
-				"Session: %s\r\n"
 				"User-Agent: app_rtsp\r\n"
-				"\r\n",
+				"Session: %s\r\n",
 				player->hostport,player->url,player->cseq,player->session[i]);
+
+		/* If we are authorized */
+		if (player->authorization)
+		{
+			/* Append header */
+			strcat(request,player->authorization);
+			/* End line */
+			strcat(request,"\r\n");
+		}
+		/* End request */
+		strcat(request,"\r\n");
+
 		/* Send request */
 		if (!SendRequest(player->fd,request,&player->end))
 			/* exit */
@@ -1935,12 +1973,11 @@ static struct SDPContent* CreateSDP(char *buffer,int bufferLen)
 					media->formats[n]->payload = atoi(i+9);
 					/* Append to all formats */
 					media->all |= media->formats[n]->format;
+					/* Inc medias */
+					n++;
 					/* Exit */
-					break;
+					//break;
 				}
-			/* Inc medias */
-			n++;
-			
 		} else if (strncmp(i,"a=control:",10)==0){
 			/* if not in media */
 			if (!media)
@@ -2837,7 +2874,7 @@ static int main_loop(struct ast_channel *chan,char *ip, int rtsp_port, char *url
 					ast_debug(4,"-Finding compatible codecs [%s]\n", \
 						  ast_format_cap_get_names(ast_channel_nativeformats(chan), &format_buf));
 					/* Get best audio track */
-					if (sdp->audio)
+					if (0)//sdp->audio) // FIXME disable audio from camera for now
 					{
 						/* Avoid overwritten */
 
@@ -3016,7 +3053,8 @@ static int main_loop(struct ast_channel *chan,char *ip, int rtsp_port, char *url
                                                                 }
 								/* Store format */
 								videoFormat = sdp->video->formats[i]->format;
-								videoNewFormat = video_compat_format; /* PORT 17.3 */
+								//videoNewFormat = video_compat_format; /* PORT 17.3 */
+								videoNewFormat = sdp->video->formats[i]->new_format; /* PORT 17.3 */
 								/* Store control */
 								videoControl = sdp->video->formats[i]->control;
 								/* Found best codec */
@@ -3203,6 +3241,14 @@ static int main_loop(struct ast_channel *chan,char *ip, int rtsp_port, char *url
 					/* Move data to begining */
 				     /*	memcpy(buffer,buffer+responseLen,bufferLen); OLD */
 					memmove(buffer,buffer+responseLen,bufferLen);
+					//send to first (even) server port (RTP) 8000 0000 0000 0000 0000 0000
+					//FIXME this is needed to start stream, but what should this really be?
+					short rtp_start[] = {0x0080,0x0000,0x0000,0x0000,0x0000,0x0000};
+					send(player->videoRtp, &rtp_start, sizeof(rtp_start), 0);
+					/* Create rtcp packet */
+					MediaStatsRR(&player->videoStats,&rtcp);
+					/* Send packet */
+					send(player->videoRtcp, &rtcp, sizeof(rtcp), 0);
 					/* Play */
 					RtspPlayerPlay(player);
 					break;
@@ -3257,7 +3303,7 @@ static int main_loop(struct ast_channel *chan,char *ip, int rtsp_port, char *url
 						break;
 					break;
 			}
-		} else if ((outfd==player->audioRtp) ||  (outfd==player->videoRtp) ) { /* outfd >0 */
+		} else if ((outfd==player->audioRtp) || (outfd==player->videoRtp) ) { /* outfd >0 */
 			/* Set length */
 			rtpLen = 0;
 
@@ -3341,8 +3387,8 @@ static int main_loop(struct ast_channel *chan,char *ip, int rtsp_port, char *url
 				 * PORT 17.5 restructure sendFrame
 				 */
 			     /*	sendFrame->subclass = videoFormat; OLD */
-				sendFrame.subclass.integer =  videoFormat;
-				sendFrame.subclass.format =  videoNewFormat;
+				sendFrame.subclass.integer = videoFormat;
+				sendFrame.subclass.format = videoNewFormat;
 				/* If not the first */
 				if (lastVideo)
 					/* Set number of samples */
@@ -3363,7 +3409,7 @@ static int main_loop(struct ast_channel *chan,char *ip, int rtsp_port, char *url
 				 * appears to not used.  Will skip for now.
 				 */
 			     /*	sendFrame->subclass |= rtp->m; OLD */
-
+				sendFrame.subclass.frame_ending = rtp->m;
 				/* Set stats */
 				MediaStatsUpdate(&player->videoStats,ts,ntohs(rtp->seq),ntohl(rtp->ssrc));
 			}
@@ -3421,7 +3467,7 @@ static int main_loop(struct ast_channel *chan,char *ip, int rtsp_port, char *url
 				/* Reset media */
 				MediaStatsReset(&player->audioStats);
 				/* Send packet */
-     				send(player->audioRtcp, &rtcp, (rtcp.common.length+1)*4, 0);
+     				send(player->audioRtcp, &rtcp, (ntohs(rtcp.common.length)+1)*4, 0);
 				/* log */
 			    /*	ast_log(LOG_DEBUG,"-Sent rtcp audio report [%d]\n",errno); OLD */
 				ast_debug(2,"-Sent rtcp audio report [%d]\n",errno); 
@@ -3431,7 +3477,7 @@ static int main_loop(struct ast_channel *chan,char *ip, int rtsp_port, char *url
 				/* Reset media */
 				MediaStatsReset(&player->videoStats);
 				/* Send packet */
-     				send(player->videoRtcp, &rtcp, (rtcp.common.length+1)*4, 0);
+     				send(player->videoRtcp, &rtcp, (ntohs(rtcp.common.length)+1)*4, 0);
 				/* log */
 			     /*	ast_log(LOG_DEBUG,"-Sent rtcp video report [%d]\n",errno); OLD */
 				ast_debug(2,"-Sent rtcp video report [%d]\n",errno); 
@@ -3693,7 +3739,7 @@ static int main_loop(struct ast_channel *chan,char *ip, int rtsp_port, char *url
 						/* Reset media */
 						MediaStatsReset(&player->audioStats);
 						/* Send packet */
-						send(player->audioRtcp, &rtcp, (rtcp.common.length+1)*4, 0);
+						send(player->audioRtcp, &rtcp, (ntohs(rtcp.common.length)+1)*4, 0);
 						/* log */
 					     /*	ast_log(LOG_DEBUG,"-Sent rtcp audio report [%d]\n",errno); OLD */
 						ast_debug(2,"-Sent rtcp audio report [%d]\n",errno); 
@@ -3706,7 +3752,7 @@ static int main_loop(struct ast_channel *chan,char *ip, int rtsp_port, char *url
 						/* Reset media */
 						MediaStatsReset(&player->videoStats);
 						/* Send packet */
-						send(player->videoRtcp, &rtcp, (rtcp.common.length+1)*4, 0);
+						send(player->videoRtcp, &rtcp, (ntohs(rtcp.common.length)+1)*4, 0);
 						/* log */
 					     /*	ast_log(LOG_DEBUG,"-Sent rtcp video report [%d]\n",errno); OLD */
 						ast_debug(2,"-Sent rtcp video report [%d]\n",errno); 
